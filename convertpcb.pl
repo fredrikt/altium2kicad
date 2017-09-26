@@ -1665,7 +1665,7 @@ EOF
 	  if($typemapalt{$otype} eq "ROUNDEDRECTANGLE")
 	  {
   	    #print "Pad: $counter $otype ".bin2hex(substr($value,$pos,200))."\n";
-        print "Warning: This is a rounded rectangle pad, and those are currently not supported by KiCad. We convert them to rounded pads for now, please verify the PCB design afterwards. This can cause overlaps and production problems!\n";
+        #print "Warning: This is a rounded rectangle pad, and those are currently not supported by KiCad. We convert them to rounded pads for now, please verify the PCB design afterwards. This can cause overlaps and production problems!\n";
 		#print "len2: $len2\n";
 		#print bin2hex(substr($value,$pos+147,$len2))."\n";
 	  }

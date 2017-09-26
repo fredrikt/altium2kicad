@@ -1053,6 +1053,67 @@ foreach my $filename(@files)
 	$modeldz{$_[0]{'ID'}}=$_[0]{'DZ'};
 	$modelwrl{$_[0]{'ID'}}="$short/Root Entry/Models/$_[3].wrl";
   });
+print("\n\nFREDRIK short $short\n");
+if (1) {
+  HandleBinFile("Components-PcbLib/Root Entry/Library/Models/Data.dat","",0,0,sub 
+  { 
+		    print "Component $_[3] COMPONENT: " . Dumper($_[0]);
+    my $fn=$_[0]{'NAME'};
+	#print "".((-f "Components-PcbLib/Root Entry/Library/Models/$fn")?"File exists.\n":"File $fn does NOT EXIST!\n");
+	$fn=~s/\.STEP$//i;$fn=~s/\.stp$//i;
+	print "R components :".$_[0]{'ID'}."->$fn\n";
+    $modelname{$_[0]{'ID'}}=$fn;
+	$modelrotx{$_[0]{'ID'}}=360-$_[0]{'ROTX'}; # I think those (ROT*, DZ) are the default values for new placements of the same device, but they can be overridden on specific instances, so we don´t need them
+	$modelroty{$_[0]{'ID'}}=360-$_[0]{'ROTY'};
+	$modelrotz{$_[0]{'ID'}}=360-$_[0]{'ROTZ'};
+	$modeldz{$_[0]{'ID'}}=$_[0]{'DZ'};
+	$modelwrl{$_[0]{'ID'}}="Components-PcbLib/Root Entry/Library/Models/$_[3].wrl";
+  });   
+
+  HandleBinFile("CHIPS-PcbLib/Root Entry/Library/Models/Data.dat","",0,0,sub 
+  { 
+    my $fn=$_[0]{'NAME'};
+	#print "".((-f "CHIPS-PcbLib/Root Entry/Library/Models/$fn")?"File exists.\n":"File $fn does NOT EXIST!\n");
+	$fn=~s/\.STEP$//i;$fn=~s/\.stp$//i;
+	#print "R:".$_[0]{'ID'}."->$fn\n";
+    $modelname{$_[0]{'ID'}}=$fn;
+	$modelrotx{$_[0]{'ID'}}=360-$_[0]{'ROTX'}; # I think those (ROT*, DZ) are the default values for new placements of the same device, but they can be overridden on specific instances, so we don´t need them
+	$modelroty{$_[0]{'ID'}}=360-$_[0]{'ROTY'};
+	$modelrotz{$_[0]{'ID'}}=360-$_[0]{'ROTZ'};
+	$modeldz{$_[0]{'ID'}}=$_[0]{'DZ'};
+	$modelwrl{$_[0]{'ID'}}="CHIPS-PcbLib/Root Entry/Library/Models/$_[3].wrl";
+  });   
+
+  HandleBinFile("Connectors-PcbLib/Root Entry/Library/Models/Data.dat","",0,0,sub 
+  { 
+    my $fn=$_[0]{'NAME'};
+	#print "".((-f "Connectors-PcbLib/Root Entry/Library/Models/$fn")?"File exists.\n":"File $fn does NOT EXIST!\n");
+	$fn=~s/\.STEP$//i;$fn=~s/\.stp$//i;
+	#print "R:".$_[0]{'ID'}."->$fn\n";
+    $modelname{$_[0]{'ID'}}=$fn;
+	$modelrotx{$_[0]{'ID'}}=360-$_[0]{'ROTX'}; # I think those (ROT*, DZ) are the default values for new placements of the same device, but they can be overridden on specific instances, so we don´t need them
+	$modelroty{$_[0]{'ID'}}=360-$_[0]{'ROTY'};
+	$modelrotz{$_[0]{'ID'}}=360-$_[0]{'ROTZ'};
+	$modeldz{$_[0]{'ID'}}=$_[0]{'DZ'};
+	$modelwrl{$_[0]{'ID'}}="Connectors-PcbLib/Root Entry/Library/Models/$_[3].wrl";
+  });   
+
+  HandleBinFile("rev02-PcbLib/Root Entry/Library/Models/Data.dat","",0,0,sub 
+		{
+		    print "rev02 $_[3] COMPONENT: " . Dumper($_[0]);
+    my $fn=$_[0]{'NAME'};
+	#print "".((-f "rev02-PcbLib/Root Entry/Library/Models/$fn")?"File exists.\n":"File $fn does NOT EXIST!\n");
+	$fn=~s/\.STEP$//i;$fn=~s/\.stp$//i;
+	print "R rev02 :".$_[0]{'ID'}."->$fn\n";
+    $modelname{$_[0]{'ID'}}=$fn;
+	$modelrotx{$_[0]{'ID'}}=360-$_[0]{'ROTX'}; # I think those (ROT*, DZ) are the default values for new placements of the same device, but they can be overridden on specific instances, so we don´t need them
+	$modelroty{$_[0]{'ID'}}=360-$_[0]{'ROTY'};
+	$modelrotz{$_[0]{'ID'}}=360-$_[0]{'ROTZ'};
+	$modeldz{$_[0]{'ID'}}=$_[0]{'DZ'};
+	$modelwrl{$_[0]{'ID'}}="rev02-PcbLib/Root Entry/Library/Models/$_[3].wrl";
+  });   
+} 
+print("\n\nFREDRIK END\n");
 
   # We extract the references between the primitives(Pads,...) and the Components:
   our %uniquemap=();
@@ -1875,12 +1936,24 @@ if(0 && defined($stp));
 	my $dz=$mdz;
 	
 	my $wrl=(defined($modelwrl{$id}) && -f $modelwrl{$id}) ? $modelwrl{$id} : undef;
+    if (! $wrl) {
+	if (! defined($stp)) {
+	    print("WRL for id $id (component $component) NOT FOUND, and no step file either\n");
+	} else {
+	    print("WRL for id $id NOT FOUND, STP ${stp}\n");
+	}
+    }
 	mkdir "wrl";
 	if(defined($stp)&& defined($wrl))
 	{
 	  $stp=~s/\w:\\.*\\//;
-	  #print "Copying $wrl to wrl/$stp.wrl\n";
+	    if (! -f "wrl/$stp.wrl") {
+		print "Copying $wrl to wrl/$stp.wrl\n";
 	  writefile("wrl/$stp.wrl",readfile($wrl));
+	    }
+	    print ("COMPONENT $component, EMBEDDED MODEL: " . $d{'MODEL.EMBED'} . " file wrl/$stp.wrl found : " . (-f "wrl/$stp.wrl") . "\n");
+	} else {
+	    print ("COMPONENT $component, EMBEDDED MODEL: " . $d{'MODEL.EMBED'} . " NOT FOUND\n");
 	}
 	$wrl="wrl/$stp.wrl" if(defined($stp));
 	

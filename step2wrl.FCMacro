@@ -5,7 +5,7 @@ import FreeCADGui
 import os,glob
 from PySide import QtGui
 
-for filename in glob.glob("Root Entry/Models/*.dat.step"):
+for filename in glob.glob("*.dat.step"):
 	ImportGui.open(filename)
 	App.setActiveDocument("Unnamed")
 	# If you have different filenames than .dat.step, you have to adapt the -9 length here:

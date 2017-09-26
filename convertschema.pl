@@ -1285,9 +1285,11 @@ EOF
   close LIB;
 }
 
+print "ROOT LIBRARIES\n";
+$rootlibraries{'Cryptech Alpha.lib'} = 1;
 foreach my $lib(sort keys %rootlibraries)
 {
-  #print "Rewriting Root Library $lib\n";
+  print "Rewriting Root Library $lib\n";
   open LIB,">$lib";
   my $timestamp=strftime("%d.%m.%Y %H:%M:%S", localtime($start_time));
   print LIB "EESchema-LIBRARY Version 2.3  Date: $timestamp\n#encoding utf-8\n";

@@ -2281,10 +2281,10 @@ EOF
 	(fp_text reference "$stp" (at 0 0) (layer F.SilkS) hide
       (effects (font (thickness 0.05)))
     )
-    (fp_text value "$FOOTPRINTDESCRIPTION" (at 0 0) (layer F.SilkS) hide
+    (fp_text value "$FOOTPRINTDESCRIPTION" (at 0 0) (layer Cmts.User)
       (effects (font (thickness 0.05)))
     )
-	(fp_text value "$SOURCEDESCRIPTION" (at 0 0) (layer F.SilkS)
+	(fp_text value "$SOURCEDESCRIPTION" (at 0 0) (layer Cmts.User)
       (effects (font (thickness 0.05)))
     )
 

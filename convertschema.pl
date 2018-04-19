@@ -531,7 +531,8 @@ EOF
 		{
 		  print "Line-breaks not implemented yet!\n";
 		}
-		drawcomponent "T 0 $x $y 100 0 1 1 $text 1\n";
+		$text = 'EMPTY' if (! $text);
+		drawcomponent "T 0 $x $y 100 0 1 1 $text Normal 1 C C\n";
       }	  
 	  elsif($d{'RECORD'} eq '2') # Pin
 	  {
@@ -776,7 +777,8 @@ EOF
 		}
 		else
 		{
-		  drawcomponent "T 0 $x $y 50 0 1 1 $text 1\n";
+		  $text = 'EMPTY' if (! $text);
+		  drawcomponent "T 0 $x $y 50 0 1 1 $text Normal 1 C C\n";
 		}
 	  }
 	  elsif($d{'RECORD'} eq '10') # Oval???

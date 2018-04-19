@@ -54,6 +54,8 @@ our $timestamp=$start_time;  # this value gets decreased every time we need a un
 my %hvmap=("0"=>"H","1"=>"V","2"=>"H","3"=>"V");
 our %uniquereferences=();
 my %myrot=("0"=>"0","90"=>"1","270"=>"2");
+my %iotypes=("0"=>"BiDi","1"=>"Output","2"=>"Input","3"=>"BiDi"); # Others unknown yet (0 is really 'unspecified' in Altium)
+my %partparams=();
 
 #Reads a file with one function
 sub readfile($)
@@ -109,8 +111,8 @@ sub get_f_position(\%$$$$$) {
 
     #my $x=($d{'LOCATION.X'}*$f);
     #my $y=($d{'LOCATION.Y'}*$f);
-    my $x=(($d{'LOCATION.X'}+(($d{'LOCATION.X_FRAC'}||0)/100000.0))*$f);
-    my $y=(($d{'LOCATION.Y'}+(($d{'LOCATION.Y_FRAC'}||0)/100000.0))*$f);
+    my $x=((($d{'LOCATION.X'}||0)+(($d{'LOCATION.X_FRAC'}||0)/100000.0))*$f);
+    my $y=((($d{'LOCATION.Y'}||0)+(($d{'LOCATION.Y_FRAC'}||0)/100000.0))*$f);
 
     my $orientation=$d{'ORIENTATION'} || 0;
     $orientation=($orientation + $part_orient) % 4;
@@ -140,12 +142,17 @@ sub get_f_position(\%$$$$$) {
     return ($x, $y, $orient, $dir);
 }
 
+#Protel for Windows - Schematic Capture Ascii File Version 5.0    -> supported
+#DProtel for Windows - Schematic Capture Binary File Version 1.2 - 2.0    -> not supported
 
-foreach my $filename(glob('"*/Root Entry/FileHeader.dat"'))
+foreach my $filename(glob('"*/Root Entry/FileHeader.dat"'), glob('"*.sch"'), glob('"*.schdoc"'))
 {
   print "Handling $filename\n";
-  my $short=$filename; $short=~s/\/Root Entry\/FileHeader\.dat$//;
-  next if -d "$short/Root Entry/Arcs6"; 
+  my $short=$filename; 
+  my $protel=($filename=~m/Root Entry\/FileHeader\.dat/)?0:1;
+  $short=~s/\/Root Entry\/FileHeader\.dat$//;
+  $short=~s/\.sch$/-kicad/;
+  next if -d "$short/Root Entry/Arcs6"; # Skipping PCB files
   open IN,"<$filename";
   undef $/;
   my $content=<IN>;
@@ -153,37 +160,54 @@ foreach my $filename(glob('"*/Root Entry/FileHeader.dat"'))
   
   next unless defined($content);
   next unless length($content)>4;
-  next if($content=~m/PCB \d+.\d+ Binary Library File/);
-  next if(unpack("l",substr($content,0,4))>length($content));
+  next if($content=~m/EESchema Schematic File Version/); # Skipping KiCad schematics
+  next if($content=~m/PCB \d+.\d+ Binary Library File/); # Skipping PCB Files
+  next if(substr($content,0,2) eq "\xD0\xCF");
+  next if((!$protel) && unpack("l",substr($content,0,4))>length($content));
 
   my $text="";
   my @a=();
   
   our %localcontains=();
+  our %partstextcounter=();
 
   open OUT,">$filename.txt";
   my $line=0;
-  while(length($content)>4 )
+  
+  if($content=~m/Protel for Windows - Schematic Capture Ascii File/)
   {
-    my $len=unpack("l",substr($content,0,4));
-	if($len<0)
-	{
-	  print "Error: Length is negative $filename $line: $len\n";
-	  last;
-	}
-    
-    #print "len: $len\n";
-    my $data=substr($content,4,$len); 
-    if($data=~m/\n/)
+    foreach(split "\n",$content)
     {
-      #print "Warning: data contains newline!\n";
+      s/\r//;
+      push @a,"|LINENO=$line|$_";
+      print OUT "$_\n\n";
+      $line++;
     }
-    $data=~s/\x00//g;
-    push @a,"|LINENO=$line|".$data;
-    $text.=$data."\n";
-    print OUT $data."\n";
-    substr($content,0,4+$len)="";  
-	$line++;
+  }
+  else
+  {
+    while(length($content)>4 )
+    {
+      my $len=unpack("l",substr($content,0,4));
+	  if($len<0)
+	  {
+        print "Error: Length is negative $filename $line: $len\n";
+	    last;
+	  }
+    
+      #print "len: $len\n";
+      my $data=substr($content,4,$len); 
+      if($data=~m/\n/)
+      {
+        #print "Warning: data contains newline!\n";
+      }
+      $data=~s/\x00//g;
+      push @a,"|LINENO=$line|".$data;
+      $text.=$data."\n";
+      print OUT $data."\n";
+      substr($content,0,4+$len)="";  
+	  $line++;
+    }
   }
   close OUT;
 
@@ -268,7 +292,7 @@ EOF
   my $prevname="";
   my $symbol="";
   my %globalf=();
-  my $globalp="";
+  my $globalp=0;
   my %globalcomment=();
   my %globalreference=();
   my %componentheader=();
@@ -277,11 +301,14 @@ EOF
   my %xypos=();
   my %lib=();
   our %componentdraw=();
+  our %customfields=();
   our %componentcontains=();
   our $LIBREFERENCE;
   my %partcomp=();
   my $relx=0;
   my $rely=0;
+  my $relh=0;
+  my $relw=0;
   my $nextxypos=undef;
   my $CURRENTPARTID=undef;
   my %partorientation;
@@ -298,8 +325,8 @@ EOF
   # Rotates 2 coordinates x y around the angle o and returns the new x and y
   sub rotate($$$) # x,y,o
   {
-    my $o=$_[2]; 
-	my $m=$_[2]&4;
+    my $o=$_[2]||0; 
+	my $m=($_[2]||0)&4;
 	$o&=3; # Perhaps mirroring needs something else?
 	#orient=("0"=>"1    0    0    -1","1"=>"0    1    1    0","2"=>"-1   0    0    1","3"=>"0    -1   -1   0");
 	if(!$o)
@@ -358,6 +385,33 @@ EOF
 	return $mirrored?$dirmapmirrored{$_[0]}:$dirmap{$_[0]};
   }
   
+  my %globalparams=();
+  
+  # Preprocess to find references for xrefs - yugh
+  foreach my $b(@a)
+  {
+    #print "b: $b\n";
+    my %d=();
+    my @l=split('\|',$b);
+    foreach my $c(@l)
+    {
+      #print "c: $c\n";
+      if($c=~m/^([^=]*)=(.*)$/s)
+      {
+        #print "$1 -> $2\n";
+        $d{$1}=$2;
+      }
+    }
+    next unless defined($d{'RECORD'});
+    if ( $d{'RECORD'} eq '41' )
+    {
+      if ( !defined($d{'COMPONENTINDEX'}) )
+      {
+        $globalparams{lc($d{'NAME'})} = $d{'TEXT'};
+      }
+    }
+  }
+  
   foreach my $b(@a)
   {
     #print "b: $b\n";
@@ -384,6 +438,7 @@ EOF
 	
 	print LOG sprintf("RECORD=%2d|LINENO=%4d|OWNERPARTID=%4d|OWNERINDEX=%4d|%s\n",defined($d{'RECORD'})?$d{'RECORD'}:-42,$d{'LINENO'},defined($d{'OWNERPARTID'})?$d{'OWNERPARTID'}+1:-42,defined($d{'OWNERINDEX'})?$d{'OWNERINDEX'}+1:-42,$o) if($USELOGGING);
 
+	
     next unless defined($d{'RECORD'});
     my $f=10;
  
@@ -392,13 +447,13 @@ EOF
 	
 	sub drawcomponent($)
 	{
-  	  $componentdraw{$LIBREFERENCE}.=$_[0] unless(defined($componentcontains{$LIBREFERENCE}{$_[0]}));
-      $componentcontains{$LIBREFERENCE}{$_[0]}=1;
+  	  $componentdraw{$LIBREFERENCE||0}.=$_[0] unless(defined($componentcontains{$LIBREFERENCE||0}{$_[0]}));
+      $componentcontains{$LIBREFERENCE||0}{$_[0]}=1;
 	}
 	
 	if ($d{'RECORD'} ne '34') {
 	  # ignore hidden records, except type 34 (designator)
-	  next if(defined($d{'ISHIDDEN'}) && $d{'ISHIDDEN'} eq "T");
+	  #next if(defined($d{'ISHIDDEN'}) && $d{'ISHIDDEN'} eq "T");
 	}
 
 	if(defined($OWNERPARTDISPLAYMODE) && defined($d{'OWNERINDEX'}))
@@ -407,7 +462,12 @@ EOF
 	  next if ((($d{'OWNERINDEX'} || 0) eq $OWNERLINENO-1) && ($d{'OWNERPARTDISPLAYMODE'}||-1) ne $OWNERPARTDISPLAYMODE); 
 	}
 	
-    if(defined($d{'OWNERPARTID'}) && $d{'OWNERPARTID'}>=0)
+	if(($d{'OWNERPARTID'}||"") eq "0")
+	{
+	  print "Warning: Edge case: OWNERPARTID=".(defined($d{'OWNERPARTID'})?$d{'OWNERPARTID'}:"")." RECORD=$d{'RECORD'} the behaviour has been changed on 2018-01-05. If this causes a regression, please file an issue.\n";
+	}
+	
+    if(defined($d{'OWNERPARTID'}) && $d{'OWNERPARTID'}>0)
 	{
 	  if(defined($CURRENTPARTID))
 	  {
@@ -422,7 +482,13 @@ EOF
         my $fid=4+$globalf{$globalp}++;
         my $o=($d{'ORIENTATION'}||0)*900;
 		my $size=$fontsize{$d{'FONTID'}}*6;
-	    drawcomponent "T $o $x $y $size 0 1 1 \"$d{'TEXT'}\" Normal 0 L B\n";
+        my $value=$d{'TEXT'};
+        if ( substr($value,0,1) eq '=' ) # It's an xref - look it up
+        {
+            my $paramname = substr($value,1);
+            $value = $globalparams{lc($paramname)} || $value;
+        }
+	    drawcomponent "T $o $x $y $size 0 1 1 \"$value\" Normal 0 L B\n";
 	  }
 	  elsif($d{'RECORD'} eq '32') # Sheet Name
 	  {
@@ -545,12 +611,12 @@ EOF
 		if(defined($d{'LOCATION.X'})&&defined($d{'LOCATION.Y'}))
 		{
 		  my %dirtext=("0"=>"L","1"=>"D","2"=>"R","3"=>"U");
-		  my $pinorient=$d{'PINCONGLOMERATE'}&3;
-		  my $pinnamesize=($d{'PINCONGLOMERATE'}&8)?70:1; # There is a bug in KiCad´s plotting code BZR5054, which breaks all components when this size is 0
-		  my $pinnumbersize=($d{'PINCONGLOMERATE'}&16)?70:1; # The :1 should be changed to :0 as soon as the bug is resolved.
+		  my $pinorient=($d{'PINCONGLOMERATE'}||0)&3;
+		  my $pinnamesize=(($d{'PINCONGLOMERATE'}||0)&8)?70:1; # There is a bug in KiCad´s plotting code BZR5054, which breaks all components when this size is 0
+		  my $pinnumbersize=(($d{'PINCONGLOMERATE'}||0)&16)?70:1; # The :1 should be changed to :0 as soon as the bug is resolved.
 		  my %map2=("0"=>"0","1"=>"3","2"=>"2","3"=>"1");
-		  $pinorient+=$map2{$partorientation{$globalp}&3}; $pinorient&=3;
-		  my $mirrored=$partorientation{$globalp}&4;
+		  $pinorient+=$map2{($partorientation{$globalp}||0)&3}; $pinorient&=3;
+		  my $mirrored=($partorientation{$globalp}||0)&4;
 		  my $dir=$dirtext{$pinorient};
 		  my $x=$d{'LOCATION.X'}*$f;
 		  my $y=$d{'LOCATION.Y'}*$f;
@@ -582,9 +648,27 @@ EOF
 	  
 	  }
 	
-	  elsif($d{'RECORD'} eq '6') # Polyline
+      elsif($d{'RECORD'} eq '3') # Pin symbol
 	  {
+        #|RECORD=3|OWNERINDEX=1989|ISNOTACCESIBLE=T|INDEXINSHEET=9|OWNERPARTID=1|SYMBOL=1|LOCATION.X=1145|LOCATION.Y=821|SCALEFACTOR=10
+        my $x=($d{'LOCATION.X'}*$f)-$relx;
+        my $y=($d{'LOCATION.Y'}*$f)-$rely;
+        ($x,$y)=rotate($x,$y,$partorientation{$globalp});
+        if ( $d{'SYMBOL'} eq '1' )
+        {
+            # A 'Not' symbol - a small circle
+            drawcomponent "C $x $y ".(($d{'SCALEFACTOR'}||10)*$f/5.0)." 0 1 10 N\n";
+        }
+        else
+        {
+            print "WARNING: Pin symbol type $d{'SYMBOL'} not understood - IGNORING!\n";
+        }
+      }
+      elsif($d{'RECORD'} eq '6'|| $d{'RECORD'} eq '5') # Polyline or Bezier!
+	  {
+        #RECORD=5|OWNERINDEX=183|ISNOTACCESIBLE=T|INDEXINSHEET=12|OWNERPARTID=1|LINEWIDTH=1|COLOR=16711680|LOCATIONCOUNT=2|X1=464|Y1=943|X2=466|Y2=946
         #RECORD= 6|OWNERPARTID=   1|OWNERINDEX=1468|LINEWIDTH=1|LOCATIONCOUNT=2|OWNERINDEX=1468|X1=440|X2=440|Y1=1210|Y2=1207|
+        print "WARNING: Bezier paths are not supported in KiCad - creating a basic polyline through the control points instead\n" if ( $d{'RECORD'} eq '5' );
 		my $fill=(defined($d{'ISSOLID'})&&$d{'ISSOLID'} eq 'T')?"F":"N";
 		my $cmpd="P ".($d{'LOCATIONCOUNT'}||0)." 0 1 ".($d{'LINEWIDTH'}||1)."0 ";
 		foreach my $i(1 .. $d{'LOCATIONCOUNT'})
@@ -625,15 +709,22 @@ EOF
 		my $LINEWIDTH=$d{LINEWIDTH}||1;
 		drawcomponent "C $x $y ".(($d{'RADIUS'}||0)*$f)." 0 1 $LINEWIDTH"."0 $fill\n";
 	  }
-	  elsif($d{'RECORD'} eq '12') # Arc
+      elsif($d{'RECORD'} eq '12' || $d{'RECORD'} eq '11') # Arc or Elliptical arc (we average the axes as KiCad doesn't support it)
 	  {
 	    #RECORD=12|ENDANGLE=180.000|LINEWIDTH=1|LOCATION.X=1065|LOCATION.Y=700|OWNERINDEX=738|RADIUS=5|STARTANGLE=90.000|		
         my $x=($d{'LOCATION.X'}*$f)-$relx;
 		my $y=($d{'LOCATION.Y'}*$f)-$rely;
 		($x,$y)=rotate($x,$y,$partorientation{$globalp});
-		my $r=int(($d{'RADIUS'}||0)+(($d{'RADIUS_FRAC'}||0)/100000.0))*$f;
+		my $r=int((($d{'RADIUS'}||0)+(($d{'RADIUS_FRAC'}||0)/100000.0))*$f);
 		my $sa="0"; $sa="$1$2" if(defined($d{'STARTANGLE'}) && $d{'STARTANGLE'}=~m/(\d+)\.(\d)(\d+)/);
-		my $ea="360"; $ea="$1$2" if(defined($d{'ENDANGLE'}) && $d{'ENDANGLE'}=~m/(\d+)\.(\d)(\d+)/);
+		my $ea="3600"; $ea="$1$2" if(defined($d{'ENDANGLE'}) && $d{'ENDANGLE'}=~m/(\d+)\.(\d)(\d+)/);
+        if ( $d{'RECORD'} eq '11' )
+        {
+            my $sc=int((($d{'SECONDARYRADIUS'}||0)+(($d{'SECONDARYRADIUS_FRAC'}||0)/100000.0))*$f);
+            $r=($r+$sc)/2;
+            print "WARNING: Elliptical arcs are not supported in KiCad - creating circular arc using average radius instead\n";
+        }
+        $ea+=3600 if ( $sa > $ea );
 		my @liste=();
 		if(($ea-$sa)>=1800)
 		{
@@ -653,8 +744,8 @@ EOF
 		  my ($sa,$ea)=@$_;
 		  #print "  $sa $ea\n";
 		  #print "partorient: $partorientation{$globalp}, winkel: ".$winkel{$partorientation{$globalp}&3}."\n";
-		  $sa=3600-$winkel{$partorientation{$globalp}&3}*10+$sa;$sa%=3600; $sa-=3600 if($sa>1800);
-		  $ea=3600-$winkel{$partorientation{$globalp}&3}*10+$ea;$ea%=3600; $ea-=3600 if($ea>1800);
+		  $sa=3600-$winkel{($partorientation{$globalp}||0)&3}*10+$sa;$sa%=3600; $sa-=3600 if($sa>1800);
+		  $ea=3600-$winkel{($partorientation{$globalp}||0)&3}*10+$ea;$ea%=3600; $ea-=3600 if($ea>1800);
 		  #print "sa: $sa ea:$ea\n";
 		  my $sarad=$sa/1800*$pi;
 		  my $earad=$ea/1800*$pi;
@@ -671,10 +762,10 @@ EOF
 	    #RECORD=41|OWNERPARTID=1|OWNERINDEX=1568|LOCATION.X=80|LOCATION.Y=846|NAME=Comment|OWNERINDEX=1568|TEXT=2.1mm x 5.5mm DC jack|
 		#RECORD=41|OWNERPARTID=1|OWNERINDEX=219|LOCATION.X=514|LOCATION.Y=144|NAME=>NAME|ORIENTATION=2|COLOR=8388608|FONTID=3|TEXT=R39|UNIQUEID=MCQTJAIN|NOTAUTOPOSITION=T|INDEXINSHEET=7
 
-		my $x=($d{'LOCATION.X'}*$f)-$relx;
-		my $y=($d{'LOCATION.Y'}*$f)-$rely;
+		my $x=(($d{'LOCATION.X'}||0)*$f)-$relx;
+		my $y=(($d{'LOCATION.Y'}||0)*$f)-$rely;
 		($x,$y)=rotate($x,$y,$partorientation{$globalp});
-		my $text=$d{'DESCRIPTION'} || $d{'TEXT'}; $text=~s/\~/~~/g; $text=~s/\~1/\~/g; $text=~s/ /\~/g; 
+		my $text=$d{'DESCRIPTION'} || $d{'TEXT'} || ""; $text=~s/\~/~~/g; $text=~s/\~1/\~/g; $text=~s/ /\~/g; 
 		if($d{'NOTAUTOPOSITION'})
 		{
      	  my $rot=$d{'ORIENTATION'} || $myrot{$fontrotation{$d{'FONTID'}}};
@@ -701,19 +792,31 @@ EOF
 		($cx,$cy)=rotate($cx,$cy,$partorientation{$globalp});
 		drawcomponent "S $x $y $cx $cy 0 1 10 f\n";
       }
-	  elsif($d{'RECORD'} eq '11') # Ellipse ???
-	  {
-	    print "Ellipses are not yet supported by KiCAD\n";
-		#RADIUS=9|RADIUS_FRAC=93698|SECONDARYRADIUS=5|SECONDARYRADIUS_FRAC=4539
-		#LOCATION.X=130|LOCATION.Y=90|
-		#LINEWIDTH=1|STARTANGLE=0.809|ENDANGLE=179.510|COLOR=16711680
-	  }
 	  elsif($d{'RECORD'} eq '29') # Junction
 	  {
 	    #RECORD=29|OWNERPARTID=  -1|OWNERINDEX=   0|LOCATION.X=130|LOCATION.Y=1230|
 		my $px=($d{'LOCATION.X'}*$f);
 		my $py=($sheety-$d{'LOCATION.Y'}*$f);
 		print OUT "Connection ~ $px $py\n";
+	  }
+  	  elsif($d{'RECORD'} eq '1')  # Schematic Component
+	  {
+        #RECORD= 1|OWNERPARTID=  -1|OWNERINDEX=   0|AREACOLOR=11599871|
+		#COMPONENTDESCRIPTION=4-port multiple-TT hub with USB charging support|CURRENTPARTID=1|DESIGNITEMID=GLI8024-48_4|DISPLAYMODECOUNT=1|LIBRARYPATH=*|
+		#LIBREFERENCE=GLI8024-48_4|
+		#LOCATION.X=1380|LOCATION.Y=520|PARTCOUNT=2|PARTIDLOCKED=F|SHEETPARTFILENAME=*|SOURCELIBRARYNAME=*|TARGETFILENAME=*|
+		$LIBREFERENCE=$d{'LIBREFERENCE'}; $LIBREFERENCE=~s/ /_/g;
+		$LIBREFERENCE.="_".$d{'CURRENTPARTID'} if($d{'PARTCOUNT'}>2);
+		$CURRENTPARTID=$d{'CURRENTPARTID'} || undef;
+		$OWNERPARTDISPLAYMODE=$d{'DISPLAYMODE'};
+		$OWNERLINENO=$d{'LINENO'};
+		$globalp++;
+		$nextxypos=($d{'LOCATION.X'}*$f)." ".($sheety-$d{'LOCATION.Y'}*$f);
+		$partorientation{$globalp}=$d{'ORIENTATION'}||0;
+		$partorientation{$globalp}+=4 if(defined($d{'ISMIRRORED'}) && $d{'ISMIRRORED'} eq 'T');
+        $xypos{$globalp}=$nextxypos ;
+		$relx=$d{'LOCATION.X'}*$f;
+		$rely=$d{'LOCATION.Y'}*$f;
 	  }
 	  else
 	  {
@@ -734,14 +837,29 @@ EOF
 		my $bold=$fontbold{$d{'FONTID'}}?"12":"0";
 		my $rot=$d{'ORIENTATION'} || $myrot{$fontrotation{$d{'FONTID'}}};
 		#print "FONTROT: $fontrotation{$d{'FONTID'}}\n" if($text=~m/0xA/);
-		my $text=$d{'TEXT'}||""; $text=~s/\~/~~/g; $text=~s/\n/\\n/gs;
+		my $text=$d{'TEXT'}||"";
+        if ( substr($text,0,1) eq '=' ) # It's an xref - look it up
+        {
+            my $paramname = substr($text,1);
+            $text = $globalparams{lc($paramname)} || $text;
+        }
+        $text=~s/\~/~~/g; $text=~s/\n/\\n/gs;
 	    $dat="Text Notes ".($d{'LOCATION.X'}*$f)." ".($sheety-$d{'LOCATION.Y'}*$f)." $rot    $size   ~ $bold\n$text\n" if($text ne "" && $text ne " ");
+	  }
+	  elsif($d{'RECORD'} eq '12') # Arc
+	  {
+	    print "This circle/arc is not part of a component, but KiCad does not support that. As a workaround we are creating a dummy component.\n";
+		# TODO: Dummy creation
 	  }
 	  elsif($d{'RECORD'} eq '15') # Sheet Symbol
 	  {
 	    #|SYMBOLTYPE=Normal|RECORD=15|LOCATION.X=40|ISSOLID=T|YSIZE=30|OWNERPARTID=-1|COLOR=128|INDEXINSHEE=41|AREACOLOR=8454016|XSIZE=90|LOCATION.Y=230|UNIQUEID=OLXGMUHL
 		$symbol="\$Sheet\nS ".($d{'LOCATION.X'}*$f)." ".($sheety-$d{'LOCATION.Y'}*$f)." ".($d{'XSIZE'}*$f)." ".($d{'YSIZE'}*$f);
 	    #$dat="\$Sheet\nS ".($symbolx)." ".($symboly)." ".($symbolsizex)." ".($d{'YSIZE'}*$f)."\nF0 \"$prevname\" 60\nF1 \"$prevfilename\" 60\n\$EndSheet\n";
+        $relx=$d{'LOCATION.X'}*$f;
+        $rely=$d{'LOCATION.Y'}*$f;
+        $relw=$d{'XSIZE'}*$f;
+        $relh=$d{'YSIZE'}*$f;
 	  }
 	  elsif($d{'RECORD'} eq '32') # Sheet Name
 	  {
@@ -752,7 +870,7 @@ EOF
       }
 	  elsif($d{'RECORD'} eq '33') # Sheet Symbol
 	  {
-        $prevfilename=$d{'TEXT'} if($d{'RECORD'} eq '33'); $prevfilename=~s/\.SchDoc/-SchDoc\.sch/;	
+        $prevfilename=$d{'TEXT'} if($d{'RECORD'} eq '33'); $prevfilename=~s/\.SchDoc/-SchDoc\.sch/i;	
 	    $dat="$symbol\nF0 \"$prevname\" 60\nF1 \"$prevfilename\" 60\n\$EndSheet\n";
 		$rootlibraries{"$short-cache.lib"}=1;
 	  }	  
@@ -1016,7 +1134,9 @@ EOF
         my $x=($d{'LOCATION.X'}*$f);
 		my $y=$sheety-($d{'LOCATION.Y'}*$f);
 		my $orientation=$d{'ORIENTATION'} || 0;
-    	$dat.="Text Label $x $y $orientation 70 ~\n$d{TEXT}\n" if($d{'TEXT'} ne "");
+        my $size=$fontsize{$d{'FONTID'}}*6;
+        my $name=$d{'TEXT'}||"";  $name=~s/((.\\)+)/\~$1\~/g; $name=~s/(.)\\/$1/g; 
+    	$dat.="Text Label $x $y $orientation $size ~\n$name\n" if($d{'TEXT'} ne "");
       }
 	  elsif($d{'RECORD'} eq '34') #Designator
 	  {
@@ -1036,56 +1156,75 @@ EOF
 	  elsif($d{'RECORD'} eq '41') #Parameter
 	  {
         #RECORD=41|OWNERPARTID=  -1|OWNERINDEX=2659|ISHIDDEN=T|LINENO=2661|LOCATION.X=1400|LOCATION.Y=260|NAME=PinUniqueId|OWNERINDEX=2659|TEXT=DXTGJKVR|
+        #RECORD=41|OWNERINDEX=1293|INDEXINSHEET=-1|OWNERPARTID=-1|LOCATION.X=845|LOCATION.Y=310|COLOR=8388608|FONTID=1|TEXT==Value|NAME=Comment|UNIQUEID=ROAWIONW
 		#my $ts=uniqueid2timestamp($d{'UNIQUEID'});
 	    #print "UNIQ: $d{UNIQUEID} -> $ts\n";
-        if($d{'NAME'} eq "Comment")
-		{
-		  my ($x, $y, $orient, $dir) = get_f_position(%d, $f, $partorientation{$globalp}, $relx, $rely, $sheety);
-
-		  #$dat.="Text Label $x $y $orientation 70 ~\n$d{TEXT}\n";
-		  if (defined($d{'TEXT'}))
-		  {
-		      my $value = $d{'TEXT'};
-		      push @{$parts{$globalp}},"F 1 \"$value\" $orient $x $y 60  0000 $dir\n"; #L BNN
-		      push @{$parts{$globalp}},"F 2 \"\" H $x $y 60  0000 C CNN\n";
-		      push @{$parts{$globalp}},"F 3 \"\" H $x $y 60  0000 C CNN\n";
-		  }
-
-		  $x=($d{'LOCATION.X'}*$f)-$relx;
-		  $y=($d{'LOCATION.Y'}*$f)-$rely;
-
-		  $commentpos{$LIBREFERENCE}="\"$LIBREFERENCE\" $x $y 60 $orient V L BNN";
-		  $globalcomment{$globalp}=$d{'TEXT'};
-		}
-		elsif($d{'NAME'} eq "Rule")
+        $partparams{lc($d{'NAME'})}=$d{'TEXT'};
+        if ( !( defined($d{'ISHIDDEN'}) && $d{'ISHIDDEN'} eq 'T') )
         {
-		  my $x=($d{'LOCATION.X'}*$f);
-		  my $y=$sheety-($d{'LOCATION.Y'}*$f);
-		  my $o=$d{'ORIENTATION'} || 0;
-    	  $dat.="Text Label $x $y $o 70 ~\n$d{DESCRIPTION}\n" if($d{'DESCRIPTION'} ne "");
-		}
-		elsif($d{'NAME'} eq "Value")
-		{
-		    my ($x, $y, $orient, $dir) = get_f_position(%d, $f, $partorientation{$globalp}, $relx, $rely, $sheety);
-		    if (defined($d{'TEXT'}))
-		    {
-			my $value = $d{'TEXT'};
-			push @{$parts{$globalp}},"F 1 \"$value\" $orient $x $y 60  0000 $dir\n"; #L BNN
-			push @{$parts{$globalp}},"F 2 \"\" H $x $y 60  0000 C CNN\n";
-			push @{$parts{$globalp}},"F 3 \"\" H $x $y 60  0000 C CNN\n";
-		    }
-		}
-		elsif(defined($d{'LOCATION.X'}))
-		{
-          my $x=($d{'LOCATION.X'}*$f);
-		  my $y=$sheety-($d{'LOCATION.Y'}*$f);
-		  my $o=$d{'ORIENTATION'} || 0;
-    	  $dat.="Text Label $x $y $o 70 ~\n$d{TEXT}\n" if(defined($d{'TEXT'}) && $d{'TEXT'} ne "");
-		}
-		else
-		{
-		  #print "Error: Parameter without position!\n";
-		}
+          if(($d{'NAME'}||"") eq "Comment")
+          {
+            my ($x, $y, $orient, $dir) = get_f_position(%d, $f, $partorientation{$globalp}, $relx, $rely, $sheety);
+
+            #$dat.="Text Label $x $y $orientation 70 ~\n$d{TEXT}\n";
+            if ( defined($d{'TEXT'}) )
+            {
+                my $value = $d{'TEXT'};
+                if ( substr($value,0,1) eq '=' ) # It's an xref - look it up
+                {
+                    my $paramname = substr($value,1);
+                    $value = $partparams{lc($paramname)} || $value;
+                }
+                push @{$parts{$globalp}},"F 1 \"$value\" $orient $x $y 60  0000 $dir\n"; #L BNN
+                push @{$parts{$globalp}},"F 2 \"\" H $x $y 60  0000 C CNN\n";
+                push @{$parts{$globalp}},"F 3 \"\" H $x $y 60  0000 C CNN\n";
+            }
+
+            $x=($d{'LOCATION.X'}*$f)-$relx;
+            $y=($d{'LOCATION.Y'}*$f)-$rely;
+
+            $commentpos{$LIBREFERENCE}="\"$LIBREFERENCE\" $x $y 60 $orient V L BNN";
+            $globalcomment{$globalp}=$d{'TEXT'};
+          }
+          elsif(($d{'NAME'}||"") eq "Rule")
+          {
+            my $x=(($d{'LOCATION.X'} || 0) *$f);
+            my $y=$sheety-(($d{'LOCATION.Y'}||0)*$f);
+            my $o=$d{'ORIENTATION'} || 0;
+            $dat.="Text Label $x $y $o 70 ~\n".($d{'DESCRIPTION'}||"")."\n" if(defined($d{'DESCRIPTION'}) && $d{'DESCRIPTION'} ne "");
+          }
+          elsif(($d{'NAME'}||"") eq "Value")
+          {
+              my ($x, $y, $orient, $dir) = get_f_position(%d, $f, $partorientation{$globalp}, $relx, $rely, $sheety);
+              if (defined($d{'TEXT'}))
+              {
+              my $value = $d{'TEXT'};
+              push @{$parts{$globalp}},"F 1 \"$value\" $orient $x $y 60  0000 $dir\n"; #L BNN
+              push @{$parts{$globalp}},"F 2 \"\" H $x $y 60  0000 C CNN\n";
+              push @{$parts{$globalp}},"F 3 \"\" H $x $y 60  0000 C CNN\n";
+              }
+          }
+          elsif(defined($d{'LOCATION.X'}) && $d{'LOCATION.Y'} >=0 )
+          {
+            #print "Field $d{'NAME'} found on line 1093\n";
+            my $x=(($d{'LOCATION.X'}||0)*$f);
+            my $y=$sheety-(($d{'LOCATION.Y'}||0)*$f);
+            my $o=$d{'ORIENTATION'} || 0;
+            if(defined($d{'TEXT'}))
+            {
+              #print "globalp: $globalp OWNERINDEX: $d{OWNERINDEX}\n" if($d{'NAME'} eq "MPN"); I am not sure, whether the association through globalp is correct here
+              my $counter=$partstextcounter{$globalp} || 4;
+              push @{$parts{$globalp}},"F $counter \"".($d{'TEXT'}||"")."\" V 1400 2000 60  0001 C CNN \"".($d{'NAME'}||"")."\"\n";
+              $partstextcounter{$globalp}=$counter+1;
+            }
+            $dat.="Text Label $x $y $o 70 ~\n$d{TEXT}\n" if(defined($d{'TEXT'}) && $d{'TEXT'} ne "");
+          }
+          else
+          {
+            # Here we are getting Spice, Netlist, ... data. We should do something with that...
+            #print "Error: Parameter $d{'NAME'}=$d{'TEXT'} without position!\n" if(defined($d{'TEXT'}) && $d{'TEXT'} ne "*"); 
+          }
+        }
       }
 	  elsif($d{'RECORD'} eq '43') #Comment?
 	  {
@@ -1105,9 +1244,16 @@ EOF
   	  elsif($d{'RECORD'} eq '22') #No ERC
 	  {
         #RECORD=22|OWNERPARTID=  -1|OWNERINDEX=   0|ISACTIVE=T|LINENO=1833|LOCATION.X=630|LOCATION.Y=480|SUPPRESSALL=T|SYMBOL=Thin Cross|
-        my $x=($d{'LOCATION.X'}*$f);
-		my $y=$sheety-($d{'LOCATION.Y'}*$f);
-    	$dat.="NoConn ~ $x $y\n";
+        if(defined($d{'LOCATION.X'}))
+        {
+          my $x=($d{'LOCATION.X'}*$f);
+		  my $y=$sheety-($d{'LOCATION.Y'}*$f);
+    	  $dat.="NoConn ~ $x $y\n";
+        }
+        else
+        {
+          print "Error: No ERC without position !  $b\n";
+        }
       }
 	  elsif($d{'RECORD'} =~m/^(10|14)$/) # Rectangle
 	  {
@@ -1162,16 +1308,15 @@ EOF
 		my $ident="";
 		if(-f $png)
 		{
-		` $ident="$imagemagick$identify" "$png"`;
+		 $ident=`"$imagemagick$identify" "$png"`;
 		}
-	    #print "$ident\n";
-		my $imagex=1; my $imagey=1;
+	    my $imagex=1; my $imagey=1;
 		if($ident=~m/PNG (\w+)x(\w+)/)
 		{
 		  $imagex=$1; $imagey=$2;
 		}
 		my $scale=$widthx/$imagex/3.3; $scale=~s/\./,/;
-		#print "$png $imagex $imagey $widthx $scale\n";
+		#print "$png $imagex $imagey $widthx $scale $ident\n";
 		if(-f $png)
 		{
 		  $dat.="\$Bitmap\nPos $mx $my\nScale $scale\nData\n";
@@ -1187,17 +1332,21 @@ EOF
 	  }
 	  elsif($d{'RECORD'} eq '28' || $d{'RECORD'} eq '209') # Text Frame
 	  {
+        sub min ($$) { $_[$_[0] > $_[1]] }
   		my $x=($d{'LOCATION.X'}*$f);
 		my $y=$sheety-($d{'LOCATION.Y'}*$f);
 		#my $x=($d{'LOCATION.X'}*$f)-$relx;
 		#my $y=($d{'LOCATION.Y'}*$f)-$rely;
-        ($x,$y)=rotate($x,$y,$partorientation{$globalp});
-		my $cx=($d{'CORNER.X'}*$f)-$relx;
-		my $cy=($d{'CORNER.Y'}*$f)-$rely;
-		($cx,$cy)=rotate($cx,$cy,$partorientation{$globalp});
-		my $text=$d{'TEXT'}; $text=~s/\~1/\~/g; $text=~s/ /\~/g;
+        #($x,$y)=rotate($x,$y,$partorientation{$globalp});
+		my $cx=($d{'CORNER.X'}*$f);
+		my $cy=$sheety-($d{'CORNER.Y'}*$f);
+		#($cx,$cy)=rotate($cx,$cy,$partorientation{$globalp});
+        my $text=$d{'TEXT'}; $text=~s/\~1/  /g; $text=~s/ /\~/g if ( ($d{'WORDWRAP'}||'N') eq 'N' );
         my $o=$d{'ORIENTATION'} || 0;
-   	    $dat.="Text Label $x $y $o 70 ~\n$text\n";
+        $x=$x<$cx?$x:$cx;
+        $y=$y<$cy?$y:$cy;
+        my $size=$fontsize{$d{'FONTID'}}*6;
+   	    $dat.="Text Label $x $y $o $size ~\n$text\n";
 		#drawcomponent "T 0 $x $y 100 0 1 1 $text 1\n";
 		#!!! Line-break, Alignment, ...
       }	  
@@ -1227,13 +1376,42 @@ EOF
 	  {
 	    # References $d{'FILENAME'} as a filepath, but this likely does not exist
 	  }
-	  elsif($d{'RECORD'} eq '18')
+	  elsif($d{'RECORD'} eq '18') # Port
 	  {
-	    print "RECORD=18: $b\n";
+        #RECORD=18|INDEXINSHEET=75|OWNERPARTID=-1|STYLE=3|IOTYPE=1|ALIGNMENT=1|WIDTH=60|LOCATION.X=510|LOCATION.Y=990|COLOR=128|FONTID=1|AREACOLOR=8454143|TEXTCOLOR=128|NAME=ADC_VIN|UNIQUEID=ANXOUWEQ|HEIGHT=10
+        #RECORD=18|INDEXINSHEET=73|OWNERPARTID=-1|STYLE=3|ALIGNMENT=1|WIDTH=45|LOCATION.X=625|LOCATION.Y=325|COLOR=128|FONTID=1|AREACOLOR=8454143|TEXTCOLOR=128|NAME=GPIO_IF|HARNESSTYPE=GPIO|UNIQUEID=RNYSNNOD|HEIGHT=10
+        # No support for HARNESSTYPE yet (KiCad doesn't have such a feature)  We could instantiate lots of Ports as per the .Hardness file definition, but how would we lay them out?
+        my $x=($d{'LOCATION.X'}*$f);
+        my $y=$sheety-($d{'LOCATION.Y'}*$f);
+        my $orientation=($d{'ALIGNMENT'}||0)>2 ? 0:2; # Altium seems to ignore this for harnesses?
+        my $shape=$iotypes{$d{'IOTYPE'} || 0 }; # Altium never seems to write out IOTYPE=0 for BiDi's
+        #$x += $d{'WIDTH'}*10 ; # WRONG for ports on the "right side" of components (which need to be taggead as 'left' types too) - but we can't know that, as it's not encoded in the Altium file!
+        print "WARNING: Port orientation may be incorrect and thus unconnected - ports on the 'left' of wires may need moving and orientation flipping\n";
+        my $name=$d{'NAME'}; $name=~s/((.\\)+)/\~$1\~/g; $name=~s/(.)\\/$1/g; 
+        my $labeltype="GLabel";
+        my $size=$fontsize{$d{'FONTID'}}*6;
+        $name.="_HARN", $labeltype="HLabel" if ( defined($d{'HARNESSTYPE'}) ); # Annotated bodge for missing harness feature
+        $dat.="Text $labeltype $x $y $orientation $size ${shape} ~\n${name}\n";
 	  }
-	  elsif($d{'RECORD'} eq '16')
+	  elsif($d{'RECORD'} eq '16') # sheet entry
 	  {
-	    print "RECORD=16: $b\n";
+        # RECORD=16|OWNERINDEX=70|OWNERPARTID=-1|SIDE=1|DISTANCEFROMTOP=4|DISTANCEFROMTOP_FRAC1=500000|COLOR=128|AREACOLOR=8454143|TEXTCOLOR=128|TEXTFONTID=1|TEXTSTYLE=Full|NAME=POR|UNIQUEID=WKEEFSHT|IOTYPE=1|STYLE=3|ARROWKIND=Block & Triangle
+        # RECORD=16|OWNERINDEX=77|OWNERPARTID=-1|SIDE=1|DISTANCEFROMTOP=21|COLOR=128|AREACOLOR=8454143|TEXTCOLOR=128|TEXTFONTID=1|TEXTSTYLE=Full|NAME=Ethernet_IF|HARNESSTYPE=Ethernet|UNIQUEID=TVQYSGEL|STYLE=3|ARROWKIND=Block & Triangle
+        # Sides are: 0=left, 1=right, 2=top, 3=bottom - only left/right tested
+        my $x=$relx;
+        my $y=$sheety-$rely;
+        my $distance=(($d{'DISTANCEFROMTOP'}||0)*10+($d{'DISTANCEFROMTOP_FRAC1'}||0)/100000.0)*$f;
+        my $side=$d{'SIDE'}||0;
+        my $shape=$iotypes{$d{'IOTYPE'} || 0 };
+        my $name=$d{'NAME'};  $name=~s/((.\\)+)/\~$1\~/g; $name=~s/(.)\\/$1/g; 
+        my $orient=0;
+        $orient = 2, $y+=$distance            if ( $side eq '0' );
+        $orient = 0, $y+=$distance, $x+=$relw if ( $side eq '1' );
+        $orient = 3, $x+=$distance            if ( $side eq '2' );
+        $orient = 1, $x+=$distance, $y+=$relh if ( $side eq '3' );
+        $name.="_HARN" if ( defined($d{'HARNESSTYPE'}) ); # Annotated bodge for missing harness feature
+        my $size=$fontsize{$d{'TEXTFONTID'}}*6;
+        $dat.="Text HLabel $x $y ${orient} $size ${shape} ~\n${name}\n";
 	  }
   	  elsif($d{'RECORD'} eq '37') # Entry Wire Line / Bus connector
 	  {
@@ -1266,6 +1444,7 @@ EOF
   }
   foreach my $part (sort keys %parts)
   {
+    next if(!defined($partcomp{$part}));
     print OUT "\$Comp\n";
 	#print "Reference: $part -> $globalreference{$part}\n";
 	print OUT "L $partcomp{$part} ".($globalreference{$part}||"IC$ICcount")."\n"; # IC$ICcount\n";
@@ -1289,8 +1468,9 @@ EOF
     $comp.="F1 ".($commentpos{$component}||"\"\" 0 0 60 H V C CNN")."\n";
     $comp.="F2 \"\" 0 0 60 H V C CNN\n";
     $comp.="F3 \"\" 0 0 60 H V C CNN\n";
+	$comp.=$customfields{$component}||""; # "F 4 "MEINMPN0192301923" V 1400 2000 60  0001 C CNN "MPN"
     $comp.="DRAW\n";
-	$comp.=$componentdraw{$component};
+	$comp.=$componentdraw{$component}||"";
 	$comp.="ENDDRAW\nENDDEF\n";
 	$globalcomp.=$comp unless(defined($globalcontains{$component}));
 	$globalcontains{$component}=1;

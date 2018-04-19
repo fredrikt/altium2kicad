@@ -10,7 +10,7 @@ use Cwd qw(abs_path cwd getcwd);
 
 # Things that are missing in KiCad:
 # Octagonal pads, needed for Arduino designs (converting them to circles can cause overlaps!)
-# More than 32 layers
+# More than 32 layers, seems not to be a big problem at the moment
 # Multi-line Text Frames (Workaround: The text can be rendered by the converter)
 # A GND symbol with multiple horizontal lines arranged as a triangle
 # Individual colors for single objects like lines, ...
@@ -42,6 +42,8 @@ my $absoluteWRLpath=1;
 
 my $wrlprefix=$absoluteWRLpath ? Cwd::cwd() : ".";
 
+
+our %shownwarnings=();
 
 
 my $current_status=<<EOF
@@ -95,6 +97,11 @@ sub msubstr # My SubString is a substr function that annotates the fields while 
 {
   $fieldlabels{$_[0]}{$_[1]}{$_[2]}=$_[3]||"?";
   $bytelabels{$_}=$_[3]||"?" foreach($_[1] .. $_[1]+$_[2]-1);
+  if($_[1]>length($_[0]))
+  {
+    print STDERR "Error: substring out of range: length:".length($_[0])." pos:$_[1] wantedsize:$_[2] field:$_[3]\n";
+    return undef;
+  }
   return substr($_[0],$_[1],$_[2]);
 }
 sub dumpAnnotatedHex($)
@@ -105,10 +112,10 @@ sub dumpAnnotatedHex($)
   my $prev="";
   foreach(0 .. length($value)-1)
   {
-    $content.="<br/>" if($linebreaks{$_});
-    my $this=$bytelabels{$_}||"";;
+    $content.="<br/>".("&#160;" x $linebreaks{$_})  if($linebreaks{$_});
+    my $this=$bytelabels{$_}||"";
 	my $next=$bytelabels{$_+1}||"";
-    $content.="<div title='$this' style='background-color:".($this?"yellow":"white").";'>" if($prev ne $this);
+    $content.="<div title='$this $_' style='background-color:".($this?"yellow":"white").";'>" if($prev ne $this);
 	$content.=sprintf("%02X",unpack("C",substr($value,$_,1)));
 	$content.= $this eq $next ? " ":"</div> ";
 	$prev=$this;
@@ -186,6 +193,21 @@ sub bin2hex($)
   }
   return $value;
 }
+
+# This function converts a binary string to its hex representation for debugging
+sub bin2hexLF($)
+{
+  my $orig=$_[0];
+  my $value="";
+  return "" if(!defined($orig) || $orig eq "");
+  foreach(0 .. length($orig)-1)
+  {
+    $value.="\n##" if(($_ % 100)==99);
+    $value.=sprintf("%02X",unpack("C",substr($orig,$_,1)));
+  }
+  return $value;
+}
+
 
 # This function returns, whether 2 values are near each other
 sub near($$)
@@ -283,7 +305,7 @@ sub HandleBinFile
     my $rtyp=substr($content,$pos,length($recordtype));
 	if($rtyp ne $recordtype && !($recordtype eq "\x01\x00" && $rtyp=~m/^(\x01|\x03|\x05|\x07|\x08)\x00$/)) # Dimensions have both 01:00 and 05:00 record types
 	{
-	  print "Error: Wrong recordtype: ".bin2hex($rtyp).", expected ".bin2hex($recordtype)." at pos $pos.\n";
+	  print "ERROR: Wrong recordtype: ".bin2hex($rtyp).", expected ".bin2hex($recordtype)." at pos $pos.\n";
 	  if(!$ARGV[0] eq "CRLF")
 	  {
 	    print "The wrong record type could be a new record type, or a decoding error due to wrong CRLF encoding.\n";
@@ -864,6 +886,8 @@ foreach my $filename(@files)
   %result=();
   our @asciilines=();
   our %positions=();
+  
+  %shownwarnings=();
   
   # assertdata asserts that a parsed binary field has been parsed properly, by comparing it to the ascii variant.
   sub assertdata
@@ -1488,7 +1512,7 @@ EOF
 	}
 	if(!defined($layermap{$_[0]}) && !defined($layererrors{$_[0]}))
 	{
-      print "No mapping for Layer ".$_[0]." defined!\n" ;
+      print "WARNING: No mapping for Layer ".$_[0]." defined!\n" ;
 	  $layererrors{$_[0]}=1;
 	}
 	return $layermap{$_[0]}; 
@@ -1577,57 +1601,93 @@ EOF
   #The output is collected in %pads, which is later on filled into the output file in the ComponentBodies Section.
   #HandleBinFile("$short/Root Entry/Pads6/Data.dat","\x02",0,0, sub 
   {
+    %linebreaks=(); # These must be initialized before the parsing since we might handle several files
+    %bytelabels=();
     print "Pads6...\n";
     my $value=readfile("$short/Root Entry/Pads6/Data.dat");
     #$value=~s/\r\n/\n/gs;
-	open AOUT,">$short/Root Entry/Pads6/Data.dat.txt";
 	open DOUT,">Pads.txt";
-	open HOUT,">Pads.html";
 	my $pos=0;
 	my $counter="0";
 	while(($pos+140)<length($value) && $pos>=0)
 	{
 	  #print "Loop: pos: $pos(".sprintf("0x%X",$pos).")\n";
 	  my $opos=$pos;
+	  #$linebreaks{$pos}=1;
 	  if(msubstr($value,$pos,1,"Type") =~m/[\x80\x86]/)
 	  {
-	    print AOUT bin2hex(substr($value,$pos,1302/2))."\n";
 	    $pos+=1302/2;
+		print STDERR "ERROR: 0x80 / 0x86 found in pads\n";
 		next;
 	  }
 	  if(msubstr($value,$pos,1,"Type") =~m/[\x00]/)
 	  {
-	    print AOUT bin2hex(substr($value,$pos,1402/2))."\n";
 	    $pos+=1402/2;
-	
+		print STDERR "ERROR: 0x00 found in pads\n";
 	    #print "Checking2... pos:$pos\n";
 	    if(msubstr($value,$pos,1,"Type") ne "\x02" && (length($value)>$pos+0x1e0) && substr($value,$pos+0x1e0,1) eq "\x02")
   	    {
-	       #print "Seems we should skip 0x1e0 bytes\n";
+	       print "Seems we should skip 0x1e0 bytes\n";
 		   $pos+=0x1e0;
         }		
 		next;
 	  }
 	  if(msubstr($value,$pos,1,"Type") ne "\x02")
 	  {
-        my $xpos=sprintf("0x%X",$pos);
-	    print "Parsing error in Pads, header code 02 does not match ".bin2hex(substr($value,$pos,1))." at pos $pos ($xpos)\n";
-		print AOUT bin2hex(substr($value,$pos))."\n";
-		last;
+            my $xpos=sprintf("0x%X",$pos);
+			print "ERROR: Parsing error in Pads, header code 02 does not match ".bin2hex(substr($value,$pos,1))." at pos $pos ($xpos)\n";
+			my $spos=$pos-30;
+			my $found=0;
+			foreach($spos .. length($value)-100)
+			{
+			  if(substr($value,$_,1) eq "\x02")
+			  {
+			    print "Found a potential startbyte at $_\n";
+				print "V: ".unpack("V",substr($value,$_+1,4))."\n";
+				print "C: ".unpack("C",substr($value,$_+5,1))."\n";
+			    if(unpack("V",substr($value,$_+1,4)) == unpack("C",substr($value,$_+5,1))+1)
+				{
+				   $pos=$_;
+				   $found=1;
+				   print "Found next start at $_\n";
+				   last;
+				}
+			  }
+			}
+			if(!$found)
+			{
+			  print "ERROR: Cannot find another start byte 0x02\n";
+              last;
+			}
 	  }
+	  
+	  my @starts=();
+	  my @lengths=();
+	  my @contents=();
+	  
 	  my $len=unpack("V",msubstr($value,$pos+1,4,"len"));
-	  my $len3=unpack("C",msubstr($value,$pos+5,1,"len3"));
+	  my $namelen=unpack("C",msubstr($value,$pos+5,1,"namelen"));
+
+
+	  my $tpos=$pos+1;
+	  foreach(0 .. 5)
+	  {
+		$linebreaks{$tpos}=3;
+	    $starts[$_]=$tpos+4;
+		$lengths[$_]=unpack("V",msubstr($value,$tpos,4,"len[$_]"));
+		$contents[$_]=substr($value,$tpos,$lengths[$_]);
+		$tpos+=4+$lengths[$_];
+	  }
+	  
 	  #print "len: $len\n";
 	  
 	  if($len>256 || $len<0)
 	  {
-	    print "Parsing error with length: $len at position $pos+1 (".sprintf("0x%X",$pos+1).")\n";
+	    print "ERROR: Parsing error with length: $len at position $pos+1 (".sprintf("0x%X",$pos+1).")\n";
 		last;
 	  }
   	  $linebreaks{$pos}=1;
 
-	  print AOUT bin2hex(substr($value,$pos,5))." ";
-	  print AOUT sprintf("A:%12s",bin2hex(substr($value,$pos+5,$len)))." ";
 	  my $name=msubstr($value,$pos+6,$len-1,"name");
       #print "Name: $name\n";
 	  
@@ -1635,10 +1695,15 @@ EOF
   	  assertdata("Pad",$counter,"INDEXFORSAVE",$counter);
 	  assertdata("Pad",$counter,"NAME",$name);
 	  
-	  $pos+=5+$len;
-	  $linebreaks{$pos}=1;
+	  #$pos+=5+$len; # This ignores the length of the initial fields, and is therefore wrong
+	  
+	  $pos=$starts[4]-23; # This correctly parses the initial fields. Unfortunately the rest of the code depends on the pos being 23 bytes ahead of the start of this field, so we set the pos accordingly here.
+	  #print "Difference: ".($starts[4]-$pos)."\n";
+	  
+	  
+	  #$linebreaks{$pos}=1;
 	  #print "pos: ".sprintf("0x%X",$pos+143)."\n";
-  	  my $len2=unpack("V",msubstr($value,$pos+143,4,"len2"));
+  	  my $len2=unpack("V",msubstr($value,$pos+143,4,"len2")); # This len2 field seems wrong and needs further examination
 	  $len2=50 if($len2>1000);
 	  $len2=50 if($len2==1);
       #print "len2: $len2\n"; # if($len2);
@@ -1653,7 +1718,6 @@ EOF
 	  #print "Component: $component\n";
 	  assertdata("Pad",$counter,"COMPONENT",$component) if($component>=0);
 
-	  #print AOUT "component:$component net:$net\n";
 	  assertdata("Pad",$counter,"X",bmil2(msubstr($value,$pos+36,4,"X")));
 	  assertdata("Pad",$counter,"Y",bmil2(msubstr($value,$pos+40,4,"Y")));
 	  #print "Pad x: ".bmil2(substr($value,$pos+36,4))."\n";
@@ -1677,18 +1741,18 @@ EOF
 	  $layer.=" F.Mask F.Paste" if($layer=~m/[F\*]\.Cu/);
 	  $layer.=" B.Mask B.Paste" if($layer=~m/[B\*]\.Cu/);
 
-	  my $sx=bmil2mm(msubstr($value,$pos+44,4,"sx"));
-	  my $sy=bmil2mm(msubstr($value,$pos+48,4,"sy"));
+	  my $sx=bmil2mm(msubstr($value,$pos+44,4,"sx")); # For Padmode=1, this is TOPXSIZE
+	  my $sy=bmil2mm(msubstr($value,$pos+48,4,"sy")); # For Padmode=1, this is TOPYSIZE
   	  assertdata("Pad",$counter,"XSIZE",bmil2(substr($value,$pos+44,4)));
   	  assertdata("Pad",$counter,"YSIZE",bmil2(substr($value,$pos+48,4)));
       #print "sx: $sx sy: $sy\n";
 	  
-	  # Some Pads have TOPXSIZE, MIDXSIZE, BOTXSIZE, TOPYSIZE, ... instead of XSIZE+YSIZE
+	  # Some Pads have TOPXSIZE, MIDXSIZE, BOTXSIZE, TOPYSIZE, ... instead of XSIZE+YSIZE, this is decided by PADMODE below.
 	  
-	  my $topxsize=bmil2mm(msubstr($value,$pos+52,4,"topxsize?"));
-	  my $topysize=bmil2mm(msubstr($value,$pos+56,4,"topysize?"));
-	  my $topasize=bmil2mm(msubstr($value,$pos+60,4,"topasize?"));
-	  my $topbsize=bmil2mm(msubstr($value,$pos+64,4,"topbsize?"));
+	  my $midxsize=bmil2mm(msubstr($value,$pos+52,4,"midxsize"));
+	  my $midysize=bmil2mm(msubstr($value,$pos+56,4,"midysize"));
+	  my $botxsize=bmil2mm(msubstr($value,$pos+60,4,"botxsize"));
+	  my $botysize=bmil2mm(msubstr($value,$pos+64,4,"botysize"));
   	  #assertdata("Pad",$counter,"XSIZE",bmil2(substr($value,$pos+44,4)));
   	  #assertdata("Pad",$counter,"YSIZE",bmil2(substr($value,$pos+48,4)));
 	  
@@ -1713,21 +1777,25 @@ EOF
 	  my $mdir=($dir==0)?"":" $dir";
 	  
 	  my %typemap=("2"=>"rect","1"=>"circle","3"=>"oval","0"=>"Unknown"); 
-	  my %typemapalt=("2"=>"RECTANGLE","1"=>$len2?"ROUNDEDRECTANGLE":"ROUND","3"=>"OCTAGONAL","0"=>"Unknown"); 
-	  my $otype=unpack("C",msubstr($value,$pos+72,1,"OTYPE"));
+	  my %typemapalt=("2"=>"RECTANGLE","1"=>$len2?"ROUNDEDRECTANGLE":"ROUND","3"=>"OCTAGONAL","0"=>"ROUND","9"=>"ROUNDEDRECTANGLE","4"=>"THERMALRELIEF","6"=>"POINT","7"=>"POINT"); 
+	  my $otype=unpack("C",msubstr($value,$pos+72,1,"TOPOTYPE"));
+	  my $midotype=unpack("C",msubstr($value,$pos+73,1,"MIDOTYPE")); # different shapes for different layers are not supported by KiCad
+	  my $bototype=unpack("C",msubstr($value,$pos+74,1,"BOTOTYPE"));
   	  assertdata("Pad",$counter,"SHAPE",$typemapalt{$otype});
       my $type=$typemap{$otype};
 	  #print "otype: $otype typemapalt: $typemapalt{$otype} type: $type\n";
 
 	  if($otype eq "3")
 	  {
-	     print "Warning: Octagonal pads are currently not supported by KiCad. We convert them to oval for now, please verify the PCB design afterwards. This can cause overlaps and production problems!\n";
+	     print "WARNING: Octagonal pads are currently not supported by KiCad. We convert them to oval for now, please verify the PCB design afterwards. This can cause overlaps and production problems!\n" if(!defined($shownwarnings{'OCTAGONAL'}));
+		 $shownwarnings{'OCTAGONAL'}++;
 	  }
 	  
 	  if($typemapalt{$otype} eq "ROUNDEDRECTANGLE")
 	  {
   	    #print "Pad: $counter $otype ".bin2hex(substr($value,$pos,200))."\n";
-        #print "Warning: This is a rounded rectangle pad, and those are currently not supported by KiCad. We convert them to rounded pads for now, please verify the PCB design afterwards. This can cause overlaps and production problems!\n";
+        print "WARNING: This is a rounded rectangle pad, and those are currently not supported by KiCad. We convert them to rounded pads for now, please verify the PCB design afterwards. This can cause overlaps and production problems!\n" if(!defined($shownwarnings{'ROUNDEDRECTANGLE'}));
+		$shownwarnings{'ROUNDEDRECTANGLE'}++;
 		#print "len2: $len2\n";
 		#print bin2hex(substr($value,$pos+147,$len2))."\n";
 	  }
@@ -1748,7 +1816,7 @@ EOF
 	  
 	  my %soldermaskexpansionmap=("1"=>"Rule","2"=>"Manual");
   	  assertdata("Pad",$counter,"SOLDERMASKEXPANSIONMODE",$soldermaskexpansionmap{unpack("C",msubstr($value,$pos+125,1,"SolderMaskExpansionMode"))});
-	  my $soldermaskexpansionmode=$soldermaskexpansionmap{unpack("C",msubstr($value,$pos+125,1,"SolderMaskExpansionMode"))};
+	  my $soldermaskexpansionmode=$soldermaskexpansionmap{unpack("C",msubstr($value,$pos+125,1,"SolderMaskExpansionMode"))}||"Rule";
 
 	  my $PASTEMASKEXPANSIONMODE=unpack("C",msubstr($value,$pos+124,1,"PasteMaskExpansionMode"));
 	  assertdata("Pad",$counter,"PASTEMASKEXPANSIONMODE",$altrule{$PASTEMASKEXPANSIONMODE});
@@ -1791,20 +1859,22 @@ EOF
 	  
 	  my $PADMODE=unpack("C",msubstr($value,$pos+85,1,"PadMode"));
 	  assertdata("Pad",$counter,"PADMODE",$PADMODE);
-	  
+	  if($PADMODE>0)
+	  {
+	    my %padmodes=(0=>"Simple",1=>"Top-Middle-Bottom",2=>"Full Stack");
+	    print STDERR "WARNING: Currently only the PadMode (Size and Shape) Simple is supported, ".$padmodes{$PADMODE}." is not supported by KiCad because KiCad uses the same Shape and Size on all layers.\n" if(!defined($shownwarnings{'SIMPLE'}));
+		$shownwarnings{'SIMPLE'}++;
+	  }
 	  
 	  #print "layer:$layer net:$net component=$component type:$type dir:$dir \n";
-	  print AOUT bin2hex(substr($value,$pos,147))." ";
-	  $pos+=147;
-  	  print AOUT bin2hex(substr($value,$pos,$len2))."\n";
-      $pos+=$len2;
 	  
-	  my $id=msubstr($value,$pos+2,16,"uniqueid");
-      #print "ID: $uniqueid\n";
 	  
+  	  #my $id=msubstr($value,$pos+2,16,"uniqueid"); # This seems to be very wrong, it is beyond the end of $value
+      #    print "uniqueid: ".bin2hex($id)."\n" if(defined($id));
+
 	  #print "len2: $len2\n";
 	  
-	  if(substr($value,$pos-4,4) eq "\x8B\x02\x00\x00")
+	  if(length($value)>=$pos && msubstr($value,$pos-4,4,"doubleaddition") eq "\x8B\x02\x00\x00")
 	  {
 	    #print "Double addition detected\n";
 		$pos+=unpack("V",substr($value,$pos-4,4));
@@ -1849,18 +1919,26 @@ EOF
       #print "Component: $component\n$pads{$component}\n";
 	  
 	  #print "Checking... pos:$pos\n";
-	  if(substr($value,$pos,1) ne "\x02" && (length($value)>$pos+0x1e0) && substr($value,$pos+0x1e0,1) eq "\x02")
+	  if((length($value)>$pos+0x1e0) && substr($value,$pos,1) ne "\x02" && substr($value,$pos+0x1e0,1) eq "\x02")
 	  {
 	     print "Seems we should skip 0x1e0 bytes\n";
 		 $pos+=0x1e0;
       }
 	  
+	  
+	  if($pos != $tpos)
+	  {
+	    #print "POS should be $tpos but it is currently $pos\n";
+	  }
+	  $pos=$tpos;
+	  
+	  
 	  $counter++;
 	  
 	}
-    close AOUT;
 	close DOUT;
-	
+
+	open HOUT,">Pads.html";
 	print HOUT <<EOF
 	<html>
 <head>
@@ -1884,7 +1962,7 @@ EOF
   #The results are also added to %pads
   HandleBinFile("$short/Root Entry/ComponentBodies6/Data.dat","",23,16, sub 
   { 
-    print OUT "#ComponentBodies#".escapeCRLF($_[3]).": ".bin2hex($_[2])." ".escapeCRLF($_[1])."\n" if($annotate);
+    print OUT "#ComponentBodies#".escapeCRLF($_[3]).": ".bin2hexLF($_[2])." ".escapeCRLF($_[1])."\n" if($annotate);
 
     my %d=%{$_[0]};
 	my $header=$_[2];
@@ -1993,7 +2071,7 @@ if(0 && defined($stp));
         if(defined($modelhints{$wrl}))
         {
 		  #print "OK: $wrl\n";
-          $pads{$component}.="#921 component:$component id:$id nr:$_[3]\n#".join("|",map { "$_=$_[0]{$_}" } sort keys %{$_[0]})." 0:".bin2hex($header)."\n    (model \"$wrl\"\n".$modelhints{$wrl}."\n";
+          $pads{$component}.="#921 component:$component id:$id nr:$_[3]\n#".join("|",map { "$_=$_[0]{$_}" } sort keys %{$_[0]})." 0:".bin2hexLF($header)."\n    (model \"$wrl\"\n".$modelhints{$wrl}."\n";
         }		
 		else
 		{
@@ -2047,14 +2125,14 @@ EOF
   HandleBinFile("$short/Root Entry/ShapeBasedComponentBodies6/Data.dat","\x0c",0,0, sub 
   { 
     my $value=$_[1];
-    print OUT "#ShapeBasedComponentBodies#".escapeCRLF($_[3]).": ".bin2hex($value)."\n" if($annotate);
+    print OUT "#ShapeBasedComponentBodies#".escapeCRLF($_[3]).": ".bin2hexLF($value)."\n" if($annotate);
     #print "#ShapeBasedComponentBodies#".$_[3]."\n" if($annotate);
 	my $unknownheader=substr($value,0,18); # I do not know yet, what the information in the header could mean
 	my $component=unpack("s",substr($value,7,2));
 	#print "Shape Component: $component\n";
 	assertdata("ShapeBasedComponentBody",$_[3],"COMPONENT",$component);
 	$rawbinary{"ShapeBasedComponentBody"}{$_[3]}=$_[2];
-    print OUT "# ".bin2hex($unknownheader)."\n" if($annotate);
+    print OUT "# ".bin2hexLF($unknownheader)."\n" if($annotate);
     my $textlen=unpack("l",substr($value,18,4));
 	my $text=substr($value,22,$textlen);$text=~s/\x00$//;
 	assertdata("ShapeBasedComponentBody",$_[3],"TEXT",$text);
@@ -2362,7 +2440,7 @@ EOF
 	my $x2=sprintf("%.5f",$x+cos($earad)*$r);
 	my $y2=sprintf("%.5f",$y+sin($earad)*$r);
 
-	print OUT "#Arc#$_[3]: ".bin2hex($value)."\n" if($annotate);
+	print OUT "#Arc#$_[3]: ".bin2hexLF($value)."\n" if($annotate);
 	print OUT "#Arc#$_[3]: xorig:$xorig yorig:$yorig layer:$layerorig component:$component\n" if($annotate);
 	print OUT "#Arc#$_[3]: x:$x y:$y radius:$r layer:$layer sa:$sa ea:$ea sarad:$sarad earad:$earad width:$width x1:$x1 x2:$x2 y1:$y1 y2:$y2\n" if($annotate);
 	if(($r*1.0)<=($width/2.0))
@@ -2401,7 +2479,7 @@ EOF
   { 
     my $value=$_[1];
 	$rawbinary{"Via"}{$_[3]}=$_[1];
-	print OUT "#Vias#".escapeCRLF($_[3]).": ".bin2hex($value)."\n" if($annotate);
+	print OUT "#Vias#".escapeCRLF($_[3]).": ".bin2hexLF($value)."\n" if($annotate);
     my $debug=($count<100);
     my $x=sprintf("%.5f",-$xmove+bmil2mm(substr($value,13,4)));
 	assertdata("Via",$_[3],"X",bmil2(substr($value,13,4)));
@@ -2481,7 +2559,7 @@ EOF
  	      #print "  (segment (start $x1 $y1) (end $x2 $y2) (width $width) (layer B.Paste) (net 1))\n";
      	  #print OUT "  (segment (start $x1 $y1) (end $x1 2000) (width $width) (layer B.Paste) (net 1))\n";
 	      #print OUT "  (segment (start $x2 $y2) (end $x2 2000) (width $width) (layer B.Paste) (net 1))\n";
-	      #print "DEBUG: ".bin2hex($value)."\n\n";
+	      #print "DEBUG: ".bin2hexLF($value)."\n\n";
 		}
 	  }
 	}
@@ -2504,7 +2582,7 @@ EOF
 	$pourindex-=100 if($pourindex>=100);
 	if(defined($pourindex) && ( $pourindex<0 || $pourindex>100))
 	{
-	  print "Warning: Pourindex $pourindex out of the expected range (0 .. 100)\n";
+	  print "WARNING: Pourindex $pourindex out of the expected range (0 .. 100)\n";
 	}
 	my $net=($d{'NET'}||-1)+2; my $netname=$netnames{$net};
 	#print "Polygon $_[3] has net $net\n";
@@ -2566,7 +2644,7 @@ EOF
   HandleBinFile("$short/Root Entry/Tracks6/Data.dat","\x04",0,0, sub 
   { 
     my $value=$_[1];
-	print OUT "#Tracks#".escapeCRLF($_[3]).": ".bin2hex($value)."\n" if($annotate);
+	print OUT "#Tracks#".escapeCRLF($_[3]).": ".bin2hexLF($value)."\n" if($annotate);
     $rawbinary{"Track"}{$_[3]}=$_[1];
     my $net=unpack("s",substr($value,3,2))+2;	 
 	assertdata("Track",$_[3],"RECORD","Track");
@@ -2707,7 +2785,7 @@ EOF
   HandleBinFile("$short/Root Entry/Fills6/Data.dat","\x06",0,0, sub 
   { 
     my $value=$_[1];
-    print OUT "#Fills#".escapeCRLF($_[3]).": ".bin2hex($value)."\n" if($annotate);
+    print OUT "#Fills#".escapeCRLF($_[3]).": ".bin2hexLF($value)."\n" if($annotate);
     $rawbinary{"Fill"}{$_[3]}=$_[1];
 	my $component=unpack("s",substr($value,7,2));
 	assertdata("Fill",$_[3],"COMPONENT",unpack("s",substr($value,7,2))) if($component>=0);
@@ -2758,7 +2836,7 @@ EOF
   { 
     my $value=$_[1];
 	$rawbinary{"Region"}{$_[3]}=$value;
-    print OUT "#Regions#".escapeCRLF($_[3]).": ".bin2hex(substr($value,0,1000))."\n" if($annotate);
+    print OUT "#Regions#".escapeCRLF($_[3]).": ".bin2hexLF(substr($value,0,1000))."\n" if($annotate);
 	my $unknownheader=substr($value,0,18); # I do not know yet, what the information in the header could mean
 
 
@@ -3069,7 +3147,7 @@ EOF
 	  my $text=substr($content,$pos+1,$textlen-1); 
   	  assertdata("Text",$counter,"TEXT",$text);
 	  $pos+=$textlen;
-	  print OUT "#Texts#".$opos.": ".bin2hex(substr($content,$opos,$pos-$opos))."\n";# if($annotate);
+	  print OUT "#Texts#".$opos.": ".bin2hexLF(substr($content,$opos,$pos-$opos))."\n";# if($annotate);
 	  print OUT "#Layer: $olayer Component:$component COMMENT=$comment DESIGNATOR=$designator\n";# if($annotate);
 	  print OUT "#Commenton: ".($commenton{$component}||"")." nameon: ".($nameon{$component}||"")."\n";#	  if($component>=0 && $annotate);
 	  print OUT "#Mirror: $mirror\n";# if($annotate);
@@ -3424,7 +3502,6 @@ sub decodePcbLib($)
 		  last;
 		}
         my $component=unpack("s",substr($value,$pos+30,2));	
-	    #print AOUT "component:$component net:$net\n";
         my $x1=-$xmove+bmil2mm(substr($value,$pos+36,4));
 	    my $y1=$ymove-bmil2mm(substr($value,$pos+40,4));
   	    #MarkPoint($x1,$y1) if($counter eq 2);
@@ -3616,5 +3693,4 @@ foreach(glob("ASCII*.PcbDoc"))
   }
   close OUT;
 }
-
 
